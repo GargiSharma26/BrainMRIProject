@@ -1,0 +1,133 @@
+import re
+import os
+
+import requests
+import streamlit as st
+
+
+def get_api_base_url():
+    return st.secrets.get(
+        "API_BASE_URL",
+        os.getenv("API_BASE_URL", "http://127.0.0.1:5055"),
+    ).rstrip("/")
+
+
+API_URL = f"{get_api_base_url()}/files"
+
+
+def fetch_drive_files():
+    try:
+        response = requests.get(API_URL, timeout=10)
+        if response.status_code == 200:
+            return response.json()
+        return {"error": f"API error {response.status_code}"}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def valid_username(username):
+    return re.match(r"^(?=.*[a-z])(?=.*[A-Z])(?=.*[\W_]).{6,}$", username)
+
+
+def valid_email(email):
+    return re.match(r"^[^@]+@[^@]+\.[^@]+$", email)
+
+
+def valid_phone(phone):
+    return phone.isdigit() and len(phone) == 10
+
+
+def valid_password(password):
+    return len(password) >= 6
+
+
+st.set_page_config(page_title="Login Page", page_icon="lock", layout="centered")
+
+st.markdown(
+    """
+    <style>
+    .main {
+        background-color: #f5f9ff;
+    }
+    .login-box {
+        background-color: white;
+        padding: 30px;
+        border-radius: 12px;
+        box-shadow: 0px 0px 12px rgba(0,0,0,0.1);
+        max-width: 500px;
+        margin: auto;
+    }
+    .stButton>button {
+        background-color: #1f77ff;
+        color: white;
+        border-radius: 8px;
+        height: 42px;
+        width: 100%;
+        font-weight: bold;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    """
+    <div style='text-align:center; margin-bottom:20px;'>
+        <h2 style='color:#1f77ff; margin-bottom:5px;'>Login Here</h2>
+        <div style='width:120px; height:2px; background-color:#1f77ff; margin:auto;'></div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown("<div class='login-box'>", unsafe_allow_html=True)
+
+name = st.text_input("Full Name *")
+username = st.text_input("Username *")
+st.caption("Use at least 6 characters with one uppercase letter, one lowercase letter, and one special character.")
+password = st.text_input("Password *", type="password")
+st.caption("Use at least 6 characters.")
+email = st.text_input("Email Address *")
+st.caption("Example: name@example.com")
+phone = st.text_input("Phone Number *")
+st.caption("Use exactly 10 digits, with numbers only.")
+
+if username and not valid_username(username):
+    st.warning("Username needs uppercase, lowercase, and a special character.")
+if password and not valid_password(password):
+    st.warning("Password must be at least 6 characters.")
+if email and not valid_email(email):
+    st.warning("Please enter a valid email address.")
+if phone and not valid_phone(phone):
+    st.warning("Phone number must be exactly 10 digits.")
+
+if st.button("Login"):
+    errors = []
+
+    if not name:
+        errors.append("Name is required")
+    if not username or not valid_username(username):
+        errors.append("Username must include uppercase, lowercase and special character")
+    if not password or not valid_password(password):
+        errors.append("Password must be at least 6 characters")
+    if not email or not valid_email(email):
+        errors.append("Enter a valid email")
+    if not phone or not valid_phone(phone):
+        errors.append("Phone must be exactly 10 digits")
+
+    if errors:
+        for error in errors:
+            st.error(error)
+    else:
+        data = fetch_drive_files()
+        if "error" in data:
+            st.error(data["error"])
+        else:
+            st.session_state["logged_in"] = True
+            st.session_state["name"] = name
+            st.switch_page("pages/Dashboard.py")
+
+if st.button("Forgot Password?", key="forgot_btn"):
+    st.switch_page("pages/Reset_Password.py")
+
+st.markdown("</div>", unsafe_allow_html=True)
