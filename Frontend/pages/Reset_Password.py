@@ -1,23 +1,13 @@
 import streamlit as st
+from site_style import apply_theme
 
 
-st.set_page_config(page_title="Reset Password", layout="centered")
-
-st.markdown(
-    """
-    <style>
-    .stButton>button {
-        background-color: #1f77ff;
-        color: white;
-        border-radius: 8px;
-        height: 42px;
-        width: 100%;
-        font-weight: bold;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
+st.set_page_config(
+    page_title="Reset Password",
+    layout="centered",
+    initial_sidebar_state="collapsed",
 )
+apply_theme()
 
 st.title("Reset Password")
 st.caption("Demo OTP flow for project presentation.")

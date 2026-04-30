@@ -1,5 +1,6 @@
 from pathlib import Path
 import base64
+import csv
 from datetime import datetime, timezone
 import io
 import json
@@ -9,7 +10,7 @@ from typing import Any
 
 import numpy as np
 import tensorflow as tf
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Response, UploadFile
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
@@ -31,10 +32,11 @@ DATABASE_PATH = Path(os.getenv("DATABASE_PATH", "brain_mri_records.db"))
 IMAGE_SIZE = (224, 224)
 VALIDATOR_IMAGE_SIZE = (128, 128)
 MRI_VALIDATION_THRESHOLD = 0.65
+MIN_MRI_LIKENESS_SCORE = 2
 CLASS_NAMES = [
     "Healthy Brain",
-    "Brain Tumor",
     "Alzheimer's",
+    "Brain Tumor",
     "Multiple Sclerosis (MS)",
 ]
 
@@ -170,7 +172,7 @@ def detect_screenshot_or_document(file_bytes):
 
     # Code screenshots and documents usually have large white areas with small dark text.
     # Brain MRI images usually have a dark scan background and far fewer near-white pixels.
-    if bright_fraction > 0.45 and dark_fraction < 0.25:
+    if bright_fraction > 0.70 and dark_fraction < 0.12:
         return {
             "is_rejected": True,
             "reason": "Image looks like a screenshot/document, not a brain MRI scan.",
@@ -179,7 +181,7 @@ def detect_screenshot_or_document(file_bytes):
         }
 
     # Extra guard for plain UI/code captures with mostly light or mid-tone background.
-    if bright_fraction > 0.30 and mid_fraction > 0.45 and dark_fraction < 0.20:
+    if bright_fraction > 0.55 and mid_fraction > 0.35 and dark_fraction < 0.12:
         return {
             "is_rejected": True,
             "reason": "Image has screenshot-like brightness patterns.",
@@ -194,14 +196,116 @@ def detect_screenshot_or_document(file_bytes):
     }
 
 
+def estimate_mri_likeness(file_bytes):
+    try:
+        image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Could not read image file.") from exc
+
+    original_width, original_height = image.size
+    aspect_ratio = original_width / max(original_height, 1)
+
+    image.thumbnail((256, 256))
+    image_array = np.array(image, dtype=np.float32)
+    gray = np.mean(image_array, axis=2)
+    channel_spread = np.mean(np.max(image_array, axis=2) - np.min(image_array, axis=2))
+
+    dark_fraction = float(np.mean(gray < 45))
+    bright_fraction = float(np.mean(gray > 180))
+    center = gray[
+        gray.shape[0] // 4 : gray.shape[0] * 3 // 4,
+        gray.shape[1] // 4 : gray.shape[1] * 3 // 4,
+    ]
+    center_contrast = float(np.std(center))
+    foreground_mask = gray > 35
+    foreground_fraction = float(np.mean(foreground_mask))
+
+    if np.any(foreground_mask):
+        ys, xs = np.where(foreground_mask)
+        bbox_width = (int(xs.max()) - int(xs.min()) + 1) / gray.shape[1]
+        bbox_height = (int(ys.max()) - int(ys.min()) + 1) / gray.shape[0]
+        bbox_center_x = (int(xs.min()) + int(xs.max())) / (2 * gray.shape[1])
+        bbox_center_y = (int(ys.min()) + int(ys.max())) / (2 * gray.shape[0])
+    else:
+        bbox_width = 0.0
+        bbox_height = 0.0
+        bbox_center_x = 0.0
+        bbox_center_y = 0.0
+
+    aspect_ok = 0.75 <= aspect_ratio <= 1.35
+    grayscale_ok = channel_spread < 22
+    structure_ok = (
+        dark_fraction > 0.20
+        and bright_fraction > 0.06
+        and center_contrast > 18
+        and foreground_fraction > 0.20
+        and bbox_width > 0.45
+        and bbox_height > 0.45
+        and abs(bbox_center_x - 0.5) < 0.18
+        and abs(bbox_center_y - 0.5) < 0.18
+    )
+
+    score = 0
+    reasons = []
+
+    if aspect_ok:
+        score += 1
+        reasons.append("near-square scan image")
+    if grayscale_ok:
+        score += 1
+        reasons.append("mostly grayscale")
+    if dark_fraction > 0.20:
+        score += 1
+        reasons.append("dark MRI-like background")
+    if bright_fraction > 0.06:
+        score += 1
+        reasons.append("visible bright tissue structure")
+    if center_contrast > 18:
+        score += 1
+        reasons.append("brain-like internal contrast")
+    if structure_ok:
+        score += 1
+        reasons.append("centered scan structure")
+
+    return {
+        "score": score,
+        "is_likely_mri": aspect_ok and grayscale_ok and structure_ok and score >= 5,
+        "reasons": reasons,
+        "width": original_width,
+        "height": original_height,
+        "aspect_ratio": round(float(aspect_ratio), 3),
+        "channel_spread": round(float(channel_spread), 2),
+        "dark_fraction": round(dark_fraction * 100, 2),
+        "bright_fraction": round(bright_fraction * 100, 2),
+        "center_contrast": round(center_contrast, 2),
+        "foreground_fraction": round(foreground_fraction * 100, 2),
+        "foreground_bbox_width": round(float(bbox_width), 3),
+        "foreground_bbox_height": round(float(bbox_height), 3),
+    }
+
+
 def validate_mri_image(file_bytes):
     screenshot_check = detect_screenshot_or_document(file_bytes)
+    likeness = estimate_mri_likeness(file_bytes)
+
+    if not likeness["is_likely_mri"]:
+        return {
+            "enabled": True,
+            "is_mri": False,
+            "validator_passed": False,
+            "mri_probability": None,
+            "reason": "Irrelevant image detected. Please upload a clear brain MRI scan.",
+            "likeness": likeness,
+        }
+
     if screenshot_check["is_rejected"]:
         return {
             "enabled": True,
             "is_mri": False,
-            "mri_probability": 0.0,
-            "reason": screenshot_check["reason"],
+            "validator_passed": False,
+            "mri_probability": None,
+            "reason": "Irrelevant image detected. Please upload the MRI scan image itself, not a document or screenshot.",
+            "likeness": likeness,
         }
 
     loaded_validator = get_validator_model()
@@ -211,17 +315,25 @@ def validate_mri_image(file_bytes):
             "enabled": False,
             "is_mri": True,
             "mri_probability": None,
+            "likeness": likeness,
         }
 
     image = prepare_validator_image(file_bytes)
     prediction = loaded_validator.predict(image, verbose=0)
     mri_probability = float(prediction[0][0])
+    is_confident_mri = mri_probability >= MRI_VALIDATION_THRESHOLD
 
     return {
         "enabled": True,
-        "is_mri": mri_probability >= MRI_VALIDATION_THRESHOLD,
+        "is_mri": True,
+        "validator_passed": is_confident_mri,
         "mri_probability": round(mri_probability * 100, 2),
-        "reason": "MRI validator model prediction",
+        "reason": (
+            "MRI validator model prediction"
+            if is_confident_mri
+            else "MRI validator confidence is low, so it is shown as a warning and the disease model still runs."
+        ),
+        "likeness": likeness,
     }
 
 
@@ -441,6 +553,81 @@ def list_patient_records():
     }
 
 
+@app.get("/patient-records.csv")
+def export_patient_records_csv():
+    init_database()
+    with get_db_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                id,
+                patient_name,
+                age,
+                condition,
+                symptoms,
+                prediction,
+                confidence,
+                scores_json,
+                mri_validation_json,
+                created_at
+            FROM patient_records
+            ORDER BY id DESC
+            """
+        ).fetchall()
+
+    output = io.StringIO()
+    writer = csv.DictWriter(
+        output,
+        fieldnames=[
+            "id",
+            "patient_name",
+            "age",
+            "condition",
+            "symptoms",
+            "prediction",
+            "confidence",
+            "healthy_brain_score",
+            "brain_tumor_score",
+            "alzheimers_score",
+            "multiple_sclerosis_score",
+            "mri_probability",
+            "validator_passed",
+            "validation_reason",
+            "created_at",
+        ],
+    )
+    writer.writeheader()
+
+    for row in rows:
+        scores = json.loads(row["scores_json"])
+        validation = json.loads(row["mri_validation_json"])
+        writer.writerow(
+            {
+                "id": row["id"],
+                "patient_name": row["patient_name"],
+                "age": row["age"],
+                "condition": row["condition"],
+                "symptoms": row["symptoms"],
+                "prediction": row["prediction"],
+                "confidence": row["confidence"],
+                "healthy_brain_score": scores.get("Healthy Brain"),
+                "brain_tumor_score": scores.get("Brain Tumor"),
+                "alzheimers_score": scores.get("Alzheimer's"),
+                "multiple_sclerosis_score": scores.get("Multiple Sclerosis (MS)"),
+                "mri_probability": validation.get("mri_probability"),
+                "validator_passed": validation.get("validator_passed"),
+                "validation_reason": validation.get("reason"),
+                "created_at": row["created_at"],
+            }
+        )
+
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=patient_records.csv"},
+    )
+
+
 @app.get("/files")
 def files():
     drive_files = get_drive_files(FOLDER_ID)
@@ -534,7 +721,7 @@ async def predict(file: UploadFile = File(...)):
             detail={
                 "message": validation.get(
                     "reason",
-                    "Please upload a valid brain MRI scan. Screenshots, code images, and unrelated photos are not supported.",
+                    "Irrelevant image detected. Please upload a clear brain MRI scan.",
                 ),
                 "mri_probability": validation["mri_probability"],
             },

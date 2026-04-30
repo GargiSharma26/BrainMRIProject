@@ -3,6 +3,7 @@ import os
 
 import requests
 import streamlit as st
+from site_style import apply_theme
 
 
 def get_api_base_url():
@@ -42,39 +43,19 @@ def valid_password(password):
     return len(password) >= 6
 
 
-st.set_page_config(page_title="Login Page", page_icon="lock", layout="centered")
-
-st.markdown(
-    """
-    <style>
-    .main {
-        background-color: #f5f9ff;
-    }
-    .login-box {
-        background-color: white;
-        padding: 30px;
-        border-radius: 12px;
-        box-shadow: 0px 0px 12px rgba(0,0,0,0.1);
-        max-width: 500px;
-        margin: auto;
-    }
-    .stButton>button {
-        background-color: #1f77ff;
-        color: white;
-        border-radius: 8px;
-        height: 42px;
-        width: 100%;
-        font-weight: bold;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
+st.set_page_config(
+    page_title="Brain MRI Login",
+    page_icon="lock",
+    layout="centered",
+    initial_sidebar_state="collapsed",
 )
+apply_theme()
 
 st.markdown(
     """
-    <div style='text-align:center; margin-bottom:20px;'>
-        <h2 style='color:#1f77ff; margin-bottom:5px;'>Login Here</h2>
+    <div style='text-align:center; margin-bottom:22px;'>
+        <div class='status-pill'>Brain MRI Multi-Disease Detection</div>
+        <h1 style='color:#102a56; margin-bottom:5px;'>Login</h1>
         <div style='width:120px; height:2px; background-color:#1f77ff; margin:auto;'></div>
     </div>
     """,

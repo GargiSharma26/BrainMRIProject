@@ -7,6 +7,7 @@ import streamlit as st
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+from site_style import apply_theme
 
 
 def get_api_base_url():
@@ -127,32 +128,28 @@ def confidence_note(confidence):
     return "Low confidence. Use a clearer MRI image and treat the result carefully."
 
 
-st.set_page_config(page_title="Brain MRI Analysis", layout="wide")
-
-st.markdown(
-    """
-    <style>
-    .stButton>button {
-        background-color: #1f77ff;
-        color: white;
-        border-radius: 8px;
-        height: 42px;
-        width: 100%;
-        font-weight: 700;
-    }
-    .metric-panel {
-        background-color:#f3f7ff;
-        border:1px solid #d8e6ff;
-        padding:18px;
-        border-radius:8px;
-        text-align:center;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
+st.set_page_config(
+    page_title="Brain MRI Analysis",
+    layout="wide",
+    initial_sidebar_state="collapsed",
 )
+apply_theme()
+
+if not st.session_state.get("logged_in"):
+    st.warning("Please login first to access the MRI analysis dashboard.")
+    if st.button("Go to Login"):
+        st.switch_page("app.py")
+    st.stop()
 
 with st.sidebar:
+    st.header("Navigation")
+    if st.button("Patient Records"):
+        st.switch_page("pages/Patient_Records.py")
+    if st.button("Logout"):
+        st.session_state.clear()
+        st.switch_page("app.py")
+
+    st.divider()
     st.header("System Status")
     health = check_backend()
     if health.get("status") == "ok":
@@ -257,6 +254,13 @@ if st.button("Analyze MRI", key="analyze_btn"):
             else:
                 st.caption(f"Patient record saved with ID {saved_record.get('id')}.")
 
+            mri_validation = result.get("mri_validation", {})
+            if mri_validation.get("enabled") and not mri_validation.get("validator_passed", True):
+                st.info(
+                    "MRI validator confidence was low, but the image was still analyzed. "
+                    "Use a clear MRI scan for the most reliable project demonstration."
+                )
+
             result_col, confidence_col = st.columns([1, 1])
             with result_col:
                 st.markdown(
@@ -296,8 +300,14 @@ if st.button("Analyze MRI", key="analyze_btn"):
                 with heatmap_col:
                     heatmap_bytes = base64.b64decode(gradcam_overlay)
                     st.image(heatmap_bytes, caption="Grad-CAM Overlay", use_container_width=True)
-                    st.caption(
-                        "Brighter colors (yellow/white) showing highest attention and darker colors (blue/black) showing little to no impact."
+                    st.markdown(
+                        """
+                        <div class='heatmap-note'>
+                            Brighter colors (yellow/white) show the model's highest attention.
+                            Darker colors (blue/black) show little to no impact on the prediction.
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
                     )
 
             st.download_button(
