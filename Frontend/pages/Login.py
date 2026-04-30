@@ -6,18 +6,19 @@ import streamlit as st
 
 
 def get_api_base_url():
-    return st.secrets.get(
-        "API_BASE_URL",
-        os.getenv("API_BASE_URL", "http://127.0.0.1:5055"),
-    ).rstrip("/")
-
-
-API_URL = f"{get_api_base_url()}/files"
-
-
-def fetch_drive_files():
+    default_url = os.getenv("API_BASE_URL", "http://127.0.0.1:5055")
     try:
-        response = requests.get(API_URL, timeout=10)
+        return st.secrets.get("API_BASE_URL", default_url).rstrip("/")
+    except Exception:
+        return default_url.rstrip("/")
+
+
+HEALTH_URL = f"{get_api_base_url()}/health"
+
+
+def check_backend():
+    try:
+        response = requests.get(HEALTH_URL, timeout=10)
         if response.status_code == 200:
             return response.json()
         return {"error": f"API error {response.status_code}"}
@@ -119,13 +120,12 @@ if st.button("Login"):
         for error in errors:
             st.error(error)
     else:
-        data = fetch_drive_files()
-        if "error" in data:
-            st.error(data["error"])
-        else:
-            st.session_state["logged_in"] = True
-            st.session_state["name"] = name
-            st.switch_page("pages/Dashboard.py")
+        backend = check_backend()
+        if "error" in backend:
+            st.warning(f"Login accepted, but backend is not reachable yet: {backend['error']}")
+        st.session_state["logged_in"] = True
+        st.session_state["name"] = name
+        st.switch_page("pages/Dashboard.py")
 
 if st.button("Forgot Password?", key="forgot_btn"):
     st.switch_page("pages/Reset_Password.py")

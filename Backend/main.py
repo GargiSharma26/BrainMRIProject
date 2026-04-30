@@ -1,8 +1,11 @@
 from pathlib import Path
 import base64
+from datetime import datetime, timezone
 import io
 import json
 import os
+import sqlite3
+from typing import Any
 
 import numpy as np
 import tensorflow as tf
@@ -11,6 +14,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from PIL import Image
+from pydantic import BaseModel, Field
 
 
 app = FastAPI(title="Brain MRI Multi-Disease Detection API")
@@ -23,6 +27,7 @@ MODEL_FILE_ID = "15U3oJrBTIurCMCqFFH1JUq-NjMPDyboP"
 MODEL_DIR = Path("model")
 MODEL_PATH = MODEL_DIR / "final_brain_multi_disease_model.keras"
 VALIDATOR_PATH = MODEL_DIR / "mri_validator.keras"
+DATABASE_PATH = Path(os.getenv("DATABASE_PATH", "brain_mri_records.db"))
 IMAGE_SIZE = (224, 224)
 VALIDATOR_IMAGE_SIZE = (128, 128)
 MRI_VALIDATION_THRESHOLD = 0.65
@@ -37,18 +42,70 @@ model = None
 validator_model = None
 
 
+class PatientRecord(BaseModel):
+    patient_name: str = Field(..., min_length=1, max_length=120)
+    age: int = Field(..., ge=1, le=120)
+    condition: str = Field(..., min_length=1, max_length=120)
+    symptoms: str = ""
+    prediction: str = Field(..., min_length=1, max_length=120)
+    confidence: float = Field(..., ge=0, le=100)
+    scores: dict[str, float] = Field(default_factory=dict)
+    mri_validation: dict[str, Any] = Field(default_factory=dict)
+
+
+def get_db_connection():
+    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(DATABASE_PATH)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def init_database():
+    with get_db_connection() as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS patient_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                patient_name TEXT NOT NULL,
+                age INTEGER NOT NULL,
+                condition TEXT NOT NULL,
+                symptoms TEXT,
+                prediction TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                scores_json TEXT NOT NULL,
+                mri_validation_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+
+
+@app.on_event("startup")
+def startup_event():
+    init_database()
+
+
 def get_drive_service():
     credentials_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
-    if credentials_json:
-        creds = service_account.Credentials.from_service_account_info(
-            json.loads(credentials_json),
-            scopes=SCOPES,
-        )
-    else:
-        creds = service_account.Credentials.from_service_account_file(
-            SERVICE_ACCOUNT_FILE,
-            scopes=SCOPES,
-        )
+    try:
+        if credentials_json:
+            creds = service_account.Credentials.from_service_account_info(
+                json.loads(credentials_json),
+                scopes=SCOPES,
+            )
+        else:
+            creds = service_account.Credentials.from_service_account_file(
+                SERVICE_ACCOUNT_FILE,
+                scopes=SCOPES,
+            )
+    except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Google Drive credentials are not configured. Add credentials.json "
+                "locally or set GOOGLE_CREDENTIALS_JSON on Render."
+            ),
+        ) from exc
     return build("drive", "v3", credentials=creds)
 
 
@@ -187,6 +244,22 @@ def find_last_conv_layer(loaded_model):
     return None
 
 
+def colorize_heatmap(heatmap_array):
+    clipped = np.clip(heatmap_array, 0.0, 1.0)
+
+    red = np.clip(3.0 * clipped - 0.7, 0.0, 1.0)
+    green = np.clip(3.0 * clipped - 0.25, 0.0, 1.0)
+    blue = np.clip(1.2 - 2.4 * clipped, 0.0, 1.0)
+
+    colorized = np.stack([red, green, blue], axis=-1)
+
+    # Push the highest-attention regions toward white after they become yellow.
+    white_boost = np.clip((clipped - 0.82) / 0.18, 0.0, 1.0)
+    colorized = colorized * (1 - white_boost[..., None]) + white_boost[..., None]
+
+    return (colorized * 255).astype(np.uint8)
+
+
 def make_heatmap_overlay(file_bytes, class_index):
     loaded_model = get_model()
     base_model = None
@@ -244,12 +317,10 @@ def make_heatmap_overlay(file_bytes, class_index):
     heatmap_array = np.array(heatmap_image, dtype=np.float32) / 255.0
 
     original_array = np.array(original, dtype=np.float32)
-    red_heatmap = np.zeros_like(original_array)
-    red_heatmap[..., 0] = 255
-    red_heatmap[..., 1] = 80 * (1 - heatmap_array)
+    colored_heatmap = colorize_heatmap(heatmap_array).astype(np.float32)
 
-    alpha = np.expand_dims(heatmap_array * 0.45, axis=2)
-    overlay = original_array * (1 - alpha) + red_heatmap * alpha
+    alpha = np.expand_dims(0.25 + heatmap_array * 0.50, axis=2)
+    overlay = original_array * (1 - alpha) + colored_heatmap * alpha
     overlay = np.clip(overlay, 0, 255).astype(np.uint8)
 
     output = io.BytesIO()
@@ -277,6 +348,96 @@ def health():
         "validator_loaded": validator_model is not None,
         "model_path": str(MODEL_PATH),
         "validator_path": str(VALIDATOR_PATH),
+        "database_path": str(DATABASE_PATH),
+        "database_ready": DATABASE_PATH.exists(),
+    }
+
+
+@app.post("/patient-records")
+def create_patient_record(record: PatientRecord):
+    init_database()
+    created_at = datetime.now(timezone.utc).isoformat()
+
+    with get_db_connection() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO patient_records (
+                patient_name,
+                age,
+                condition,
+                symptoms,
+                prediction,
+                confidence,
+                scores_json,
+                mri_validation_json,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record.patient_name,
+                record.age,
+                record.condition,
+                record.symptoms,
+                record.prediction,
+                record.confidence,
+                json.dumps(record.scores),
+                json.dumps(record.mri_validation),
+                created_at,
+            ),
+        )
+        record_id = cursor.lastrowid
+
+    return {
+        "message": "Patient record saved",
+        "id": record_id,
+        "created_at": created_at,
+    }
+
+
+@app.get("/patient-records")
+def list_patient_records():
+    init_database()
+    with get_db_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                id,
+                patient_name,
+                age,
+                condition,
+                symptoms,
+                prediction,
+                confidence,
+                scores_json,
+                mri_validation_json,
+                created_at
+            FROM patient_records
+            ORDER BY id DESC
+            LIMIT 100
+            """
+        ).fetchall()
+
+    records = []
+    for row in rows:
+        records.append(
+            {
+                "id": row["id"],
+                "patient_name": row["patient_name"],
+                "age": row["age"],
+                "condition": row["condition"],
+                "symptoms": row["symptoms"],
+                "prediction": row["prediction"],
+                "confidence": row["confidence"],
+                "scores": json.loads(row["scores_json"]),
+                "mri_validation": json.loads(row["mri_validation_json"]),
+                "created_at": row["created_at"],
+            }
+        )
+
+    return {
+        "count": len(records),
+        "records": records,
     }
 
 

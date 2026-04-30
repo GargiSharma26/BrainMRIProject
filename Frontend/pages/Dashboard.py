@@ -10,15 +10,17 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
 
 def get_api_base_url():
-    return st.secrets.get(
-        "API_BASE_URL",
-        os.getenv("API_BASE_URL", "http://127.0.0.1:5055"),
-    ).rstrip("/")
+    default_url = os.getenv("API_BASE_URL", "http://127.0.0.1:5055")
+    try:
+        return st.secrets.get("API_BASE_URL", default_url).rstrip("/")
+    except Exception:
+        return default_url.rstrip("/")
 
 
 API_BASE_URL = get_api_base_url()
 PREDICT_URL = f"{API_BASE_URL}/predict"
 HEALTH_URL = f"{API_BASE_URL}/health"
+PATIENT_RECORDS_URL = f"{API_BASE_URL}/patient-records"
 
 
 def create_pdf(name, age, condition, symptoms, prediction, confidence, scores):
@@ -62,7 +64,7 @@ def create_pdf(name, age, condition, symptoms, prediction, confidence, scores):
 
 def check_backend():
     try:
-        response = requests.get(HEALTH_URL, timeout=5)
+        response = requests.get(HEALTH_URL, timeout=20)
         if response.status_code == 200:
             return response.json()
         return {"status": "error", "detail": response.text}
@@ -94,6 +96,27 @@ def predict_mri(uploaded_file):
             return {"error": response.text}
 
     return response.json()
+
+
+def save_patient_record(name, age, condition, symptoms, result):
+    payload = {
+        "patient_name": name,
+        "age": int(age),
+        "condition": condition,
+        "symptoms": symptoms or "",
+        "prediction": result["prediction"],
+        "confidence": float(result["confidence"]),
+        "scores": result.get("scores", {}),
+        "mri_validation": result.get("mri_validation", {}),
+    }
+
+    try:
+        response = requests.post(PATIENT_RECORDS_URL, json=payload, timeout=15)
+        if response.status_code == 200:
+            return response.json()
+        return {"error": response.text}
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 def confidence_note(confidence):
@@ -136,9 +159,15 @@ with st.sidebar:
         st.success("Backend connected")
         st.write(f"Model downloaded: {health.get('model_downloaded')}")
         st.write(f"Model loaded: {health.get('model_loaded')}")
+        st.write(f"Database ready: {health.get('database_ready')}")
     else:
         st.error("Backend unavailable")
-        st.caption(health.get("detail", "Start FastAPI on port 5055."))
+        st.caption(
+            health.get(
+                "detail",
+                "Set API_BASE_URL to your deployed Render backend URL.",
+            )
+        )
 
     st.divider()
     st.caption("Classes")
@@ -213,9 +242,20 @@ if st.button("Analyze MRI", key="analyze_btn"):
             scores = result.get("scores", {})
             gradcam_overlay = result.get("gradcam_overlay")
             final_condition = other_condition if condition == "Other" else condition
+            saved_record = save_patient_record(
+                name,
+                age,
+                final_condition,
+                symptoms,
+                result,
+            )
             pdf = create_pdf(name, age, final_condition, symptoms, prediction, confidence, scores)
 
             st.success("Analysis complete")
+            if "error" in saved_record:
+                st.warning(f"Analysis finished, but patient record was not saved: {saved_record['error']}")
+            else:
+                st.caption(f"Patient record saved with ID {saved_record.get('id')}.")
 
             result_col, confidence_col = st.columns([1, 1])
             with result_col:
@@ -256,6 +296,9 @@ if st.button("Analyze MRI", key="analyze_btn"):
                 with heatmap_col:
                     heatmap_bytes = base64.b64decode(gradcam_overlay)
                     st.image(heatmap_bytes, caption="Grad-CAM Overlay", use_container_width=True)
+                    st.caption(
+                        "Brighter colors (yellow/white) showing highest attention and darker colors (blue/black) showing little to no impact."
+                    )
 
             st.download_button(
                 label="Download PDF Report",

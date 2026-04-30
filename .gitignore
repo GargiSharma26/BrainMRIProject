@@ -1,0 +1,11 @@
+**/.venv/
+**/__pycache__/
+**/*.pyc
+**/.streamlit/secrets.toml
+Backend/credentials.json
+Backend/validator_data/
+Backend/*.db
+Backend/*.sqlite
+Backend/*.sqlite3
+.DS_Store
+Thumbs.db

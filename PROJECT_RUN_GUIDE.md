@@ -27,7 +27,7 @@ This is an educational engineering project. It is not a medical diagnosis tool a
 Open PowerShell:
 
 ```powershell
-cd C:\Users\Gargi\OneDrive\Desktop\Backend
+cd C:\Users\Gargi\OneDrive\Desktop\BrainMRIProject\Backend
 py -3.12 -m venv .venv
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\.venv\Scripts\activate
@@ -49,7 +49,7 @@ Backend URLs:
 The disease model always predicts one of the four disease classes. To reject screenshots, code images, and unrelated photos, train the separate MRI validator:
 
 ```powershell
-cd C:\Users\Gargi\OneDrive\Desktop\Backend
+cd C:\Users\Gargi\OneDrive\Desktop\BrainMRIProject\Backend
 .\.venv\Scripts\activate
 python train_mri_validator.py
 ```
@@ -57,7 +57,7 @@ python train_mri_validator.py
 This creates:
 
 ```text
-C:\Users\Gargi\OneDrive\Desktop\Backend\model\mri_validator.keras
+C:\Users\Gargi\OneDrive\Desktop\BrainMRIProject\Backend\model\mri_validator.keras
 ```
 
 After training, restart the backend. Then `/predict` will first check whether the uploaded image looks like a brain MRI. If it is not an MRI, the API rejects it before running disease classification.
@@ -67,7 +67,7 @@ After training, restart the backend. Then `/predict` will first check whether th
 Open a second PowerShell window:
 
 ```powershell
-cd C:\Users\Gargi\OneDrive\Desktop\Frontend
+cd C:\Users\Gargi\OneDrive\Desktop\BrainMRIProject\Frontend
 py -3.12 -m venv .venv
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\.venv\Scripts\activate
